@@ -16,8 +16,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        # 關鍵修正：fetch-depth 設為 0 以抓取所有 Git 歷史與標籤
-        fetch-depth: 0
+        fetch-depth: 0 # 解決 "fatal: No names found" 報錯
 
     - name: set up JDK 11
       uses: actions/setup-java@v4
@@ -25,16 +24,6 @@ jobs:
         java-version: '11'
         distribution: 'temurin'
         cache: gradle
-
-    - name: Write key
-      run: |
-        if [ ! -z "${{ secrets.SIGNING_KEY }}" ]; then
-          echo KEYSTORE_PASSWORD='${{ secrets.KEYSTORE_PASSWORD }}' >> local.properties
-          echo KEYSTORE_ALIAS='${{ secrets.KEYSTORE_ALIAS }}' >> local.properties
-          echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' >> local.properties
-          echo KEY_LOCATE='../release.keystore' >> local.properties
-          echo ${{ secrets.SIGNING_KEY }} | base64 --decode > release.keystore
-        fi
 
     - name: Git describe
       id: ghd
@@ -45,60 +34,42 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    - name: Build with Gradle
-      run: ./gradlew build -P versionName=${{ steps.ghd.outputs.describe }}
+    - name: Build Debug APK
+      # 使用 assembleDebug 跳過 Release 所需的簽名配置
+      run: ./gradlew assembleDebug -P versionName=${{ steps.ghd.outputs.describe }}
 
     - name: Collect artifact name
       run: |
+        # 尋找所有生成的 APK 並設定環境變數
         for variant in vc105 normal; do
-          for build_type in debug release; do
-            # 使用 find 避免路徑匹配不到時報錯
-            apk_path=$(find push/build/outputs/apk/$variant/$build_type/ -name "*.apk" | head -n 1)
-            if [ ! -z "$apk_path" ]; then
-              artifact_name=$(basename -s .apk "$apk_path")
-              echo "${variant}_${build_type}_artifact=$artifact_name" >> $GITHUB_ENV
-            fi
-          done
+          apk_path=$(find push/build/outputs/apk/$variant/debug/ -name "*.apk" | head -n 1)
+          if [ ! -z "$apk_path" ]; then
+            artifact_name=$(basename -s .apk "$apk_path")
+            echo "${variant}_debug_artifact=$artifact_name" >> $GITHUB_ENV
+          fi
         done
 
-    - name: Upload Release For Normal
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4.6.0
       with:
-        name: ${{ env.normal_release_artifact }}
-        path: push/build/outputs/apk/normal/release/*.apk
-
-    - name: Upload Release For VC105
-      uses: actions/upload-artifact@v4.6.0
-      with:
-        name: ${{ env.vc105_release_artifact }}
-        path: push/build/outputs/apk/vc105/release/*.apk
-
-    - name: Upload Debug For Normal
-      uses: actions/upload-artifact@v4.6.0
-      with:
-        name: ${{ env.normal_debug_artifact }}
-        path: push/build/outputs/apk/normal/debug/*.apk
-
-    - name: Upload Debug For VC105
-      uses: actions/upload-artifact@v4.6.0
-      with:
-        name: ${{ env.vc105_debug_artifact }}
-        path: push/build/outputs/apk/vc105/debug/*.apk
+        name: debug-apks
+        path: push/build/outputs/apk/*/debug/*.apk
 
     - name: Get Version Name
       id: gvn
       run: |
-        # 抓取生成的 APK 檔名作為版本號參考
+        # 從檔案名提取版本號，若提取失敗則使用 Git Describe 的結果
         artifact_path=$(find push/build/outputs/apk/ -name "*.apk" | head -n 1)
-        version=$(basename "$artifact_path" | sed -r 's/.*(v[0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+        version=$(basename "$artifact_path" | sed -r 's/.*(v[0-9]+\.[0-9]+\.[0-9]+).*/\1/' || echo "${{ steps.ghd.outputs.describe }}")
         echo "version=$version" >> $GITHUB_OUTPUT
 
     - name: Release
       uses: softprops/action-gh-release@v2
+      # 僅在手動執行或推送到 Tag 時發布到 Release 頁面
       if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
       with:
         name: ${{ steps.gvn.outputs.version }}
         tag_name: ${{ steps.gvn.outputs.version }}
         target_commitish: ${{ steps.ghd.outputs.sha }}
         prerelease: true
-        files: push/build/outputs/apk/*/*/*.apk
+        files: push/build/outputs/apk/*/debug/*.apk
